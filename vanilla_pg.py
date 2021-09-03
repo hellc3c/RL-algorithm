@@ -2,7 +2,7 @@ import gym
 from gym.spaces import Box, Discrete
 import numpy as np
 import torch
-from torch import float16, nn
+from torch import dtype, float16, float32, nn
 from torch import optim
 from torch.distributions.categorical import Categorical
 from torch.random import seed
@@ -55,10 +55,6 @@ def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2, epochs=50, batch_s
     def get_value(obs):
         return value_funtion(obs)
 
-    # compute the loss of value function's decent gradient
-    def compute_value_loss(obs, rtgs):
-        return (get_value(obs) - rtgs).mean()
-
     def compute_policy_loss(obs, act, weights):
         logp = get_policy(obs).log_prob(act)
         return -(logp * weights).mean()
@@ -67,5 +63,78 @@ def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2, epochs=50, batch_s
     policy_optimizer = optim.Adam(policy_net.parameters(), lr=lr)
     value_optimizer = optim.Adam(value_funtion.parameters(), lr=lr)
 
+    loss = nn.MSELoss()
+
     def train_one_epoch():
-        
+        # making empty lists for logging
+        batch_obs = []
+        batch_acts = []
+        batch_weights = []  # for R(tau) weighting in policy gradient
+        batch_rets = []
+        batch_lens = []
+
+        obs = env.reset()
+        done = False
+        ep_rews = []
+
+        # render first episode of each epoch
+        finished_rendering_this_epoch = False
+
+        # collecting experience by acting in the enviroment with current policy
+        while True:
+
+            # rendering
+            if (not finished_rendering_this_epoch) and render:
+                env.render()
+
+            # save obs
+            batch_obs.append(obs.copy())
+
+            act = get_action(torch.as_tensor(obs, dtype=torch.float32))
+
+            obs, reward, done, _ = env.step(act)
+
+            # save act and reward
+            batch_acts.append(act)
+            ep_rews.append(reward)
+
+            if done:
+                ep_ret, ep_len = sum(ep_rews), len(ep_rews)
+                batch_rets.append(ep_ret)
+                batch_lens.append(ep_len)
+
+                batch_weights += list(reward_to_go(ep_rews))
+
+                # reset env to start a new iteration
+                obs, done, ep_rews = env.reset(), False, []
+                finished_rendering_this_epoch = True
+                if len(batch_obs) > batch_size:
+                    break
+            
+        # update parameter for both policy and value
+        policy_optimizer.zero_grad()
+        batch_policy_loss = compute_policy_loss(obs=torch.as_tensor(batch_obs, dtype=torch.float32),
+        act=torch.as_tensor(batch_acts, dtype=torch.int32),
+        weights=torch.as_tensor(batch_weights, dtype=torch.float32))
+        batch_policy_loss.backward()
+        policy_optimizer.step()
+        value_optimizer.zero_grad()
+        batch_value_loss = loss(get_value(torch.as_tensor(batch_obs, dtype=torch.float32)).squeeze(), torch.as_tensor(batch_weights, dtype=torch.float32))
+        batch_value_loss.backward()
+        value_optimizer.step()
+        return batch_policy_loss, batch_value_loss, batch_rets, batch_lens
+
+    for i in range(epochs):
+        batch_policy_loss, batch_value_loss, batch_rets, batch_lens = train_one_epoch()
+        print('epoch: %3d \t policy loss: %.3f \t value loss: %.3f \t return: %.3f \t ep_len: %.3f'%
+            (i, batch_policy_loss, batch_value_loss, np.mean(batch_rets), np.mean(batch_lens)))
+    
+if __name__=='__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env_name', '--env', type=str, default='CartPole-v0')
+    parser.add_argument('--render', action='store_true')
+    parser.add_argument('--lr', type=float, default=1e-2)
+    args = parser.parse_args()
+    print('reward to go policy gradient.')
+    train(env_name=args.env_name, lr=args.lr, render=False)
